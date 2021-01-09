@@ -3,6 +3,7 @@ Simple webVTT validation module based on https://github.com/w3c/webvtt.js
 """
 
 from dataclasses import dataclass
+import re
 
 default_cue_settings = {
     'direction': 'horizontal',
@@ -31,6 +32,7 @@ class Cue():
     alignment: str = 'center'
     text: str = ''
     tree: bool = None
+    non_serializable: bool = False
 
 class WebVTTParser():
 
@@ -58,12 +60,10 @@ class WebVTTParser():
         lines = { key:value for key, value in enumerate(input_vtt.split(sep='\n'), start=1) }
         already_collected = False
 
-#            NEWLINE = r'\r\n|\r|\n',
         def err(message: str) -> None:
             errors.append({'line': line_pos, 'message': message  })
 
         line = lines.get(line_pos)
-        total_lines = len(lines)
         line_length = len(line)
         signature = 'WEBVTT'
         bom = 0
@@ -165,9 +165,9 @@ class WebVTTParser():
                 line_pos += 1
 
             #/* CUE TEXT PROCESSING */
-            #var cuetextparser = new WebVTTCueTextParser(cue.text, err, mode, this.entities)
-            #cue.tree = cuetextparser.parse(cue.startTime, cue.endTime)
-            #cues.push(cue)
+            cuetextparser = WebVTTCueTextParser(cue.text, err, mode, self.entities)
+            cue.tree = cuetextparser.parse(cue.start_time, cue.end_time)
+            cues.append(cue)
 
         #cues.sort(function(a, b) {
         #    if (a.startTime < b.startTime)
@@ -184,24 +184,28 @@ class WebVTTParser():
 
         return errors
 
-class StringTuple():
-    def __init__(self, value: str) -> None:
-        self.__value = tuple(value)
+class Struple(str):
+    def __new__(cls, value: str):
+        obj = str.__new__(cls, value)
+        obj.__value = tuple(value)
+        return obj
 
-    def __getitem__(self, key):
-        try:
+    def __getitem__(self, key) -> str:
+        if isinstance(key, int):
+            if key<0:
+                key += len(self.__value)
+            if key<0 or key>=len(self.__value):
+                return None
             return self.__value[key]
-        except IndexError:
-            return None
+        return super().__getitem__(key)
 
 class WebVTTCueTimingsAndSettingsParser():
     def __init__(self, line: str, error_handler: callable) -> None:
         super().__init__()
 
-#        NOSPACE = /[^\u0020\t\f]/,
         self.SPACE = (' ', '\t')
         self.DIGITS = '0123456789'
-        self.line = StringTuple(line)
+        self.line = Struple(line)
         self.pos = 0
         self.err = error_handler
         self.space_before_setting = True
@@ -287,8 +291,127 @@ class WebVTTCueTimingsAndSettingsParser():
         ts = self.timestamp()
         if self.line[self.pos] is not None:
             self.err('Timestamp must not have trailing characters.')
-            return
+            return None
         return ts
+
+    def is_number(self, value: str) -> bool:
+        from math import isinf, isnan
+        try:
+            num_value = float(value)
+        except ValueError:
+            return False
+        return not (isnan(num_value) or isinf(num_value))
+
+    def parse_settings(self, input: str, cue: Cue):
+        settings = input.split()
+        seen = []
+        for i in range(len(settings)):
+            if(settings[i] == ''):
+                continue
+
+            index = settings[i].find(':')
+            setting = settings[i][:index]
+            value = settings[i][index+1:]
+
+            if setting in seen:
+                self.err('Duplicate setting.')
+            seen.append(setting)
+
+            if value=='':
+                self.err('No value for setting defined.')
+                return
+
+            if setting == 'vertical': # // writing direction
+                if value not in  ('rl','lr'):
+                    self.err('Writing direction can only be set to "rl" or "rl".')
+                    continue
+                cue.direction = value
+            elif setting == 'line':  #// line position and optionally line alignment
+                line_align = None
+                if ',' in value:
+                    comp = value.split(',')
+                    value = comp[0]
+                    line_align = comp[1]
+                if not re.match(r'^[-\d](\d*)(\.\d+)?%?$', value):
+                    self.err('Line position takes a number or percentage.')
+                    continue
+                if value.find('-', start=1) != -1:
+                    self.err('Line position can only have "-" at the start.')
+                    continue
+                if value.find('%') != -1 and value.find('%') != len(value)-1:
+                    self.err('Line position can only have "%" at the end.')
+                    continue
+                if value[0] == '-' and value[-1] == '%':
+                    self.err('Line position cannot be a negative percentage.')
+                    continue
+                num_val = value
+                is_percent = False
+                if value[-1] == '%':
+                    is_percent = True
+                    num_val = value[0:-1]
+                    if(int(num_val, 10) > 100):
+                        self.err('Line position cannot be >100%.')
+                        continue
+                if not self.is_number(num_val):
+                    self.err('Line position needs to be a number')
+                    continue
+                if line_align != None:
+                    if line_align not in ('start', 'center', 'end'):
+                        self.err('Line alignment needs to be one of start, center or end')
+                        continue
+                    cue.line_align = line_align
+                cue.snap_to_lines = not is_percent
+                cue.line_position = float(num_val)
+                if str(float(num_val) != num_val):
+                    cue.non_serializable = True
+            elif setting == 'position': # // text position and optional positionAlign
+                position_align = None
+                if ',' in value:
+                    comp = value.split(',')
+                    value = comp[0]
+                    position_align = comp[1]
+                if value[-1] != '%':
+                    self.err('Text position must be a percentage.')
+                    continue
+                num_val = value[:-1]
+                if not self.is_number(num_val):
+                    self.err('Line position needs to be a number')
+                    continue
+                if int(num_val)>100 or int(num_val)<0:
+                    self.err('Text position needs to be between 0 and 100%.')
+                    continue
+                if position_align is not None:
+                    if position_align not in ('line-left', 'center', 'line-right'):
+                        self.err('Position alignment needs to be one of line-left, center or line-right')
+                        continue
+                    cue.position_align = position_align
+                cue.text_position = float(num_val)
+            elif setting == 'size': # // size
+                if value[-1] != '%':
+                    self.err('Size must be a percentage.')
+                    continue
+                size = value[:-1]
+                if int(size)>100:
+                    self.err('Size cannot be >100%.')
+                    continue
+                if size is None: # undefined || size === "" || isNaN(size)) {
+                    self.err('Size needs to be a number')
+                    size = 100
+                    continue
+                else:
+                    size = float(size)
+                    if size<0 or size>100:
+                        self.err('Size needs to be between 0 and 100%.')
+                        continue
+                cue.size = size
+            elif setting=='align': # // alignment
+                align_values = ('start', 'center', 'end', 'left', 'right')
+                if value not in align_values:
+                    self.err(f'Alignment can only be set to one of {align_values}.')
+                    continue
+                cue.alignment = value
+            else:
+                self.err('Invalid setting.')
 
     def parse(self, cue: Cue, previous_cue_start: int):
         self.skip(self.SPACE)
@@ -296,15 +419,11 @@ class WebVTTCueTimingsAndSettingsParser():
         cue.start_time = self.timestamp()
         if cue.start_time is None:
             return
-
         if cue.start_time < previous_cue_start:
             self.err('Start timestamp is not greater than or equal to start timestamp of previous cue.')
-
         if self.line[self.pos] not in self.SPACE:
             self.err('Timestamp not separated from "-->" by whitespace.')
-
         self.skip(self.SPACE)
-
         #// 6-8
         if self.line[self.pos] != '-':
             self.err('No valid timestamp separator found.')
@@ -314,30 +433,267 @@ class WebVTTCueTimingsAndSettingsParser():
         if self.line[self.pos] != '-':
             self.err('No valid timestamp separator found.')
             return
-
         self.pos += 1
         if self.line[self.pos] != '>':
             self.err('No valid timestamp separator found.')
             return
-
         self.pos += 1
         if self.line[self.pos] not in self.SPACE:
             self.err('"-->" not separated from timestamp by whitespace.')
-
         self.skip(self.SPACE)
-
         cue.end_time = self.timestamp()
         if cue.end_time is None:
             return
-
         if cue.end_time <= cue.start_time:
             self.err('End timestamp is not greater than start timestamp.')
-
         if self.line[self.pos] not in self.SPACE:
             self.space_before_setting = False
-
         self.skip(self.SPACE)
-
-#        self.parse_settings(self.line[self.pos:], cue)
-
+        self.parse_settings(self.line[self.pos:], cue)
         return True
+
+class WebVTTCueTextParser():
+    def __init__(self, line, error_handler: callable, mode: str, entities: dict) -> None:
+        super().__init__()
+        self.line = Struple(line)
+        self.pos: int = 0
+        self.mode: str = mode
+        self.entities: dict = entities
+        self.error_handler: callable = error_handler
+
+    def err(self, message: str) -> None:
+        if self.mode != 'metadata':
+            self.error_handler(message)
+#            self.error_handler(message, self.pos+1)
+
+    def parse(self, cue_start, cue_end):
+        result = {'children':[]}
+        current = result
+        timestamps = []
+
+        def remove_cycles(tree: dict) -> dict:
+            cycleless_tree = {**tree}
+            if tree.get('children'):
+                cycleless_tree['children'] = map(remove_cycles, tree['children'])
+            cycleless_tree.pop('parent', None)
+            return cycleless_tree
+
+        def attach(token) -> None:
+            nonlocal current
+            data = {
+                'type': 'object',
+                'name': token[1],
+                'classes':token[2],
+                'children':[],
+                'parent': current
+            }
+            current['children'].append(data)
+            current = current['children'][len(current['children'])-1]
+
+        def in_scope(name: str) -> bool:
+            node = current
+            while node:
+                if node.get('name') == name:
+                    return True
+                node = node.get('parent')
+            return False
+
+        while self.line[self.pos] is not None:
+            token = self.next_token()
+            if token[0] == 'text':
+                current['children'].append({'type':'text', 'value':token[1], 'parent':current})
+            elif token[0] == 'start tag':
+                if self.mode == 'chapters':
+                    self.err('Start tags not allowed in chapter title text.')
+                name = token[1]
+                if name != 'v' and name != 'lang' and token[3] != '':
+                    self.err('Only <v> and <lang> can have an annotation.')
+                if name in ('c', 'i', 'b', 'u', 'ruby'):
+                    attach(token)
+                elif name == 'rt' and current['name'] == 'ruby':
+                    attach(token)
+                elif name == 'v':
+                    if in_scope('v'):
+                        self.err('<v> cannot be nested inside itself.')
+                    attach(token)
+                    current['value'] = token[3] #// annotation
+                    if not token[3]:
+                        self.err('<v> requires an annotation.')
+                elif name == 'lang':
+                    attach(token)
+                    current['value'] = token[3] #// language
+                else:
+                    self.err('Incorrect start tag.')
+            elif token[0] == 'end tag':
+                if self.mode == 'chapters':
+                    self.err('End tags not allowed in chapter title text.')
+                #// XXX check <ruby> content
+                if token[1] == current['name']:
+                    current = current['parent']
+                elif token[1] == 'ruby' and current['name'] == 'rt':
+                    current = current['parent']['parent']
+                else:
+                    self.err('Incorrect end tag.')
+            elif token[0] == 'timestamp':
+                if self.mode == 'chapters':
+                    self.err('Timestamp not allowed in chapter title text.')
+                timings = WebVTTCueTimingsAndSettingsParser(token[1], self.err)
+                timestamp = timings.parse_timestamp()
+                if timestamp is not None:
+                    if(timestamp <= cue_start or timestamp >= cue_end):
+                        self.err('Timestamp must be between start timestamp and end timestamp.')
+                    if(len(timestamps) > 0 and timestamps[len(timestamps)-1] >= timestamp):
+                        self.err('Timestamp must be greater than any previous timestamp.')
+                    current['children'].append({'type':'timestamp', 'value':timestamp, 'parent':current})
+                    timestamps.append(timestamp)
+
+        while current.get('parent'):
+            if current.get('name') != 'v':
+                self.err('Required end tag missing.')
+            current = current.get('parent')
+
+        return remove_cycles(result)
+
+    def next_token(self) -> tuple:
+        state = 'data'
+        result = ''
+        buffer = ''
+        classes = []
+
+        def from_char_code(*args: int) -> str:
+            return ''.join(map(chr, args))
+
+        while self.line[self.pos-1] is not None or self.pos == 0:
+            c = self.line[self.pos]
+            if state == 'data':
+                if c == '&':
+                    buffer = c
+                    state = 'escape'
+                elif c == '<' and result == '':
+                    state = 'tag'
+                elif c == '<' or c is None:
+                    return ('text', result)
+                else:
+                    result += c
+            elif state == 'escape':
+                if c == '<' or c is None:
+                    self.err('Incorrect escape.')
+                    m = re.search(r'^&#([0-9]+)$', buffer)
+                    if m:
+                        result += from_char_code(int(m[1]))
+                    else:
+                        if self.entities.get(buffer):
+                            result += self.entities.get(buffer)
+                        else:
+                            result += buffer
+                    return ('text', result)
+                elif c == '&':
+                    self.err('Incorrect escape.')
+                    result += buffer
+                    buffer = c
+                elif re.search(r'[a-z#0-9]', c, flags=re.IGNORECASE):
+                    buffer += c
+                elif c == ';':
+                    m = re.match(r'^&#(x?[0-9]+)$', buffer)
+                    if m:
+                        if 'x' in m[1]:
+                            result += from_char_code(int('0'+m[1], 16))
+                        else:
+                            result += from_char_code(int(m[1]))
+                    elif self.entities.get(buffer + c):
+                        result += self.entities.get(buffer + c)
+                    else:
+
+                        for k in self.entities.keys():
+                            if buffer.startswith(k):
+                                result += self.entities[k] + buffer[len(m):]+ c
+                                break
+                        else:
+                            self.err('Incorrect escape.')
+                            result += buffer + ';'
+                    state = 'data'
+                else:
+                    self.err('Incorrect escape.')
+                    result += buffer + c
+                    state = 'data'
+            elif state == 'tag':
+                if c in ' \t\n\f':
+                    state = 'start tag annotation'
+                elif c == '.':
+                    state = 'start tag class'
+                elif c == '/':
+                    state = "end tag"
+                elif re.search(r'\d', c):
+                    result = c
+                    state = 'timestamp tag'
+                elif c == '>' or c is None:
+                    if c == '>':
+                        self.pos += 1
+                    return ('start tag', '', [], '')
+                else:
+                    result = c
+                    state = 'start tag'
+            elif state == 'start tag':
+                if c in ' \t\f':
+                    state = 'start tag annotation'
+                elif c == '\n':
+                    buffer = c
+                    state = 'start tag annotation'
+                elif c == '.':
+                    state = 'start tag class'
+                elif c == '>' or c is None:
+                    if c == '>':
+                        self.pos +=1
+                    return ('start tag', result, [], '')
+                else:
+                    result += c
+            elif state == 'start tag class':
+                if c in ' \t\f':
+                    if buffer:
+                        classes.append(buffer)
+                    buffer = ''
+                    state = 'start tag annotation'
+                elif c == '\n':
+                    if buffer:
+                        classes.append(buffer)
+                    buffer = c
+                    state = 'start tag annotation'
+                elif c == '.':
+                    if buffer:
+                        classes.append(buffer)
+                    buffer = ''
+                elif c == '>' or c is None:
+                    if c == '>':
+                        self.pos += 1
+                    if buffer:
+                        classes.append(buffer)
+                    return ('start tag', result, classes, '')
+                else:
+                    buffer += c
+            elif state == 'start tag annotation':
+                if c == '>' or c is None:
+                    if c == '>':
+                        self.pos += 1
+                    buffer = ' '.join(buffer.split())
+                    return ('start tag', result, classes, buffer)
+                else:
+                    buffer +=c
+            elif state == 'end tag':
+                if c == '>' or c is None:
+                    if c == '>':
+                        self.pos +=1
+                    return ('end tag', result)
+                else:
+                    result += c
+            elif state == 'timestamp tag':
+                if c == '>' or c is None:
+                    if c == '>':
+                        self.pos += 1
+                    return ('timestamp', result)
+                else:
+                    result += c
+            else:
+                self.err('Never happens.') #// The joke is it might.
+            #// 8
+            self.pos += 1
+        return ()
