@@ -464,7 +464,6 @@ class WebVTTCueTextParser():
     def err(self, message: str) -> None:
         if self.mode != 'metadata':
             self.error_handler(message)
-#            self.error_handler(message, self.pos+1)
 
     def parse(self, cue_start, cue_end):
         result = {'children':[]}
