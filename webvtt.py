@@ -601,15 +601,11 @@ class WebVTTCueTextParser():
                             result += from_char_code(int(m[1]))
                     elif self.entities.get(buffer + c):
                         result += self.entities.get(buffer + c)
+                    elif k := [*filter(lambda x: buffer.startswith(x), self.entities.keys())]:
+                        result += self.entities[k[0]] + buffer[len(k[0]):]+ c
                     else:
-
-                        for k in self.entities.keys():
-                            if buffer.startswith(k):
-                                result += self.entities[k] + buffer[len(m):]+ c
-                                break
-                        else:
-                            self.err('Incorrect escape.')
-                            result += buffer + ';'
+                        self.err('Incorrect escape.')
+                        result += buffer + ';'
                     state = 'data'
                 else:
                     self.err('Incorrect escape.')
