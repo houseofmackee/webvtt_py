@@ -1,20 +1,8 @@
 """
 Simple webVTT validation module based on https://github.com/w3c/webvtt.js
 """
-
 from dataclasses import dataclass
 import re
-
-default_cue_settings = {
-    'direction': 'horizontal',
-    'snap_to_lines': True,
-    'line_position': 'auto',
-    'line_align': 'start',
-    'text_position': 'auto',
-    'position_align': 'auto',
-    'size': 100,
-    'alignment': 'center',
-}
 
 @dataclass
 class Cue():
@@ -284,7 +272,6 @@ class WebVTTCueTimingsAndSettingsParser():
         if int(val3) > 59:
             self.err('You cannot have more than 59 seconds.')
             return
-
         return int(val1)*60*60 + int(val2)*60 + int(val3) + int(val4)/1000
 
     def parse_timestamp(self):
@@ -601,8 +588,8 @@ class WebVTTCueTextParser():
                             result += from_char_code(int(m[1]))
                     elif self.entities.get(buffer + c):
                         result += self.entities.get(buffer + c)
-                    elif k := [*filter(lambda x: buffer.startswith(x), self.entities.keys())]:
-                        result += self.entities[k[0]] + buffer[len(k[0]):]+ c
+                    elif any((k := x for x in self.entities.keys() if buffer.startswith(x))):
+                        result += self.entities[k] + buffer[len(k):]+ c
                     else:
                         self.err('Incorrect escape.')
                         result += buffer + ';'
